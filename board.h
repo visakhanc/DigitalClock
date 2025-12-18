@@ -1,6 +1,6 @@
 /**
  *	File 			: board.h
- *	Description 	: DIgital Clock board common definitions
+ *	Description 	: Digital Clock board common definitions
  *	Author 			: Visakhan C
  *	Date			: 2019-11-17
  */
@@ -15,22 +15,22 @@
 	PC1	(ADC1)			24 (Wired to BAT_ADC (Resistor Divider))
 	PC2	(ADC2)			25 (Wired to CHRG of LTC4054)
 	PC3 (ADC3)			26 (Wired to Base of transistor driving Buzzer)
-	SDA (PC4)(ADC4)		27 (Wired to SDA of DS3231 RTC module)
-	SCL (PC5)(ADC5)		28 (Wired to SCL of DS3231 RTC module)
-	INT0 (PD2)			32 (Wired to Button)
-	RXD (PD0)			30 (NC)
-	TXD (PD1)			31 (Wired to CLK of TM1637 LED Driver module)
+	PC4 (SDA)(ADC4)		27 (Wired to SDA of DS3231 RTC module)
+	PC5 (SCL)(ADC5)		28 (Wired to SCL of DS3231 RTC module)
+	PD2 (INT0)			32 (Wired to Button)
+	PD0 (RXD)			30 (NC)
+	PD1 (TXD)			31 (Wired to CLK of TM1637 LED Driver module)
 	PD4 				2  (Wired to DIO of TM1637 LED Driver module)
 	PD6					10 (Wired to LED)
 	PD7 (AIN1)			11 (NC)
 	PB0 (ICP1)			12 (NC)
 
-	MOSI (PB3)			15 (NC)
-	MISO (PB4)			16 (NC)
-	SCK (PB5)			17 (NC)
+	PB3 (MOSI)			15 (ISP)
+	PB4 (MISO)			16 (ISP)
+	PB5 (SCK)			17 (ISP)
 	PB2 (SS)			14 (NC)
 	PB1 (OC1A)			13 (NC)
-	INT1 (PD3)      	1  (Wired to INT of DS3231 RTC module)
+	PD3 (INT1)      	1  (Wired to INT of DS3231 RTC module)
 
 
 
