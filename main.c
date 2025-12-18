@@ -43,28 +43,41 @@
 #define DOW_SAT			{0x6D, 0x77, 0x78, 0}
 
 
-typedef enum {
+typedef enum _dispStates {
 	DISP_HHMM = 0,
 	DISP_SS,
 	DISP_DOW,
 	DISP_DATE,
 	DISP_MONTH,
 	DISP_ALARM,
-	EDIT_ALARM
+	EDIT_ALARM,
+	DISP_TIMER_INIT,
+//	DISP_TIMER_PAUSE,
+	DISP_TIMER_MMSS,
+//	DISP_TIMER_HHMM
 } dispState_t;
 
 
-typedef enum {
-	EDIT_ALARM_START = 0,
+typedef enum _editAlarmStates {
+	EDIT_ALARM_INIT = 0,
 	EDIT_ALARM_MIN,
 	EDIT_ALARM_HOUR,
 	EDIT_ALARM_SET
 } editAlarmState_t;
 
 
+typedef struct _timer_t {
+	uint8_t sec;
+	uint8_t min;
+	uint8_t hour;
+	bool	paused;
+} timer_t;
+
+
 /* GLOBAL VARIABLES */
 static ds3231_time_t 		g_time;
 static ds3231_alarm_t		g_alarm;
+static timer_t				g_timer = {.paused = true};
 static bool					alarm_on;
 static bool					buzzer_on;
 static uint8_t 				idle;
@@ -85,6 +98,9 @@ static void buzzer(bool on);
 static uint8_t increment_bcd(uint8_t bcd);
 static uint8_t bcd2bin8(uint8_t bcd);
 static uint8_t bin2bcd8(uint8_t bin);
+static void increment_timer(timer_t *);
+static uint8_t decrement_timer(timer_t *);
+
 
 /*  MAIN  */
 int main(void)
@@ -92,7 +108,7 @@ int main(void)
 	uint8_t rtc_status;
 	bool low_bat = false;
 	dispState_t dispState = DISP_HHMM;
-	editAlarmState_t editAlarmState = EDIT_ALARM_START;
+	editAlarmState_t editAlarmState = EDIT_ALARM_INIT;
 
 	avr_init();
 	ds3231_read_alarm2(&g_alarm, &alarm_on);
@@ -106,7 +122,11 @@ int main(void)
 			rtc_flag = false;
 			ds3231_read_status(&rtc_status);
 
-			ds3231_read_time(&g_time);   /* Read time from RTC and display */
+			ds3231_read_time(&g_time);   /* Read time from RTC */
+			if(!g_timer.paused) {  /* Increment Timer */
+				increment_timer(&g_timer);
+			}
+
 			if(dispState != EDIT_ALARM) {
 				if(DISP_HHMM == dispState) {
 					if(idle < 10) ++idle;
@@ -127,6 +147,7 @@ int main(void)
 			if(alarm_on && (g_alarm.hour == g_time.hour) && (g_alarm.min == g_time.min)) {  /* Check for Alarm match */
 				if(!buzzer_on) {
 					buzzer_on = true;
+					idle = 0;
 					dispState = DISP_ALARM;
 					buzzer(true); /* Start buzzer tone */
 				}
@@ -162,7 +183,7 @@ int main(void)
 			case DISP_HHMM:
 				if(long_press) {
 					dispState = EDIT_ALARM;
-					editAlarmState = EDIT_ALARM_START;
+					editAlarmState = EDIT_ALARM_INIT;
 				}
 				else {
 					dispState = DISP_SS;
@@ -170,7 +191,12 @@ int main(void)
 				break;
 
 			case DISP_SS:
-				dispState = DISP_DOW;
+				if(long_press) {
+					dispState = DISP_TIMER_INIT;
+				}
+				else {
+					dispState = DISP_DOW;
+				}
 				break;
 
 			case DISP_DOW:
@@ -185,6 +211,30 @@ int main(void)
 				dispState = DISP_HHMM;
 				break;
 
+			case DISP_TIMER_INIT:
+				if(long_press) {
+					dispState = DISP_HHMM;
+				}
+				else {
+					g_timer.paused = false;
+					dispState = DISP_TIMER_MMSS;
+				}
+				break;
+
+			case DISP_TIMER_MMSS:
+				if(long_press) {
+					if(g_timer.paused) {
+						g_timer.hour = 0;
+						g_timer.min = 0;
+						g_timer.sec = 0;
+					}
+					dispState = DISP_TIMER_INIT;
+				}
+				else {
+					g_timer.paused = !g_timer.paused;
+				}
+				break;
+
 			case DISP_ALARM:
 				dispState = DISP_HHMM;
 				// buzzer_on = false;  // buzzer_on would be checked and set again at the alarm match check and buzzer would still sound through the whole minute, so comment this out
@@ -193,7 +243,7 @@ int main(void)
 
 			case EDIT_ALARM:
 				switch(editAlarmState) {
-				case EDIT_ALARM_START:
+				case EDIT_ALARM_INIT:
 					if(long_press) {
 						if(alarm_on) {
 							if(!ds3231_alarm2_onoff(ALARM_OFF)) {
@@ -396,6 +446,19 @@ void display(dispState_t state)
 		tm1637_bcd_to_2digits(g_time.month, &digit_buf[2], false);
 		break;
 
+	case DISP_TIMER_INIT:
+		digit_buf[0] = 0x78; //'t'
+		digit_buf[1] = 0x10; //'i'
+		tm1637_bcd_to_2digits(bin2bcd8(g_timer.sec), &digit_buf[2], true);
+		dot_pos = 2;
+		break;
+
+	case DISP_TIMER_MMSS:
+		tm1637_bcd_to_2digits(bin2bcd8(g_timer.min), &digit_buf[0], true);
+		tm1637_bcd_to_2digits(bin2bcd8(g_timer.sec), &digit_buf[2], true);
+		dot_pos = 2;
+		break;
+
 	case DISP_DOW:
 	case EDIT_ALARM:
 		break;
@@ -410,13 +473,45 @@ void display(dispState_t state)
 }
 
 
+
+
+static void increment_timer(timer_t *tim)
+{
+	if(++tim->sec > 59) {
+		tim->sec = 0;
+		if(++tim->min > 59) {
+			tim->min = 0;
+			if(++tim->hour > 99) {
+				tim->hour = 0;
+			}
+		}
+	}
+}
+
+
+static uint8_t decrement_timer(timer_t *tim)
+{
+	if((0 == tim->hour) && (0 == tim->min) && (0 == tim->sec)) {  /* Timer expired */
+		return 1;
+	}
+	if((0 == tim->sec--) && (tim->min)) {
+		tim->sec = 59;
+		if((0 == tim->min--) && (tim->hour)) {
+			tim->min = 59;
+			tim->hour--;
+		}
+	}
+	return 0;
+}
+
+
 static void edit_alarm(editAlarmState_t state)
 {
 	uint8_t digit_buf[4];
 	uint8_t dot_pos = 2;
 
 	switch(state) {
-	case EDIT_ALARM_START:
+	case EDIT_ALARM_INIT:
 		digit_buf[0] = 0x77; // 'A'
 		digit_buf[1] = 0x38; // 'L'
 		digit_buf[2] = 0x5C; // 'o'
