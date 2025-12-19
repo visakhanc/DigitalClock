@@ -50,7 +50,7 @@ typedef enum _dispStates {
 	DISP_DATE,
 	DISP_MONTH,
 	DISP_ALARM,
-	EDIT_ALARM,
+	DISP_EDIT,
 	DISP_TIMER_INIT,
 //	DISP_TIMER_PAUSE,
 	DISP_TIMER_MMSS,
@@ -58,12 +58,19 @@ typedef enum _dispStates {
 } dispState_t;
 
 
-typedef enum _editAlarmStates {
+typedef enum _editStates {
 	EDIT_ALARM_INIT = 0,
 	EDIT_ALARM_MIN,
 	EDIT_ALARM_HOUR,
-	EDIT_ALARM_SET
-} editAlarmState_t;
+	EDIT_ALARM_SET,
+	EDIT_TIME_INIT,
+	EDIT_TIME_MIN,
+	EDIT_TIME_HOUR,
+	EDIT_TIME_DATE,
+	EDIT_TIME_MONTH,
+	EDIT_TIME_YEAR,
+	EDIT_TIME_SET
+} editState_t;
 
 
 typedef struct _timer_t {
@@ -75,7 +82,7 @@ typedef struct _timer_t {
 
 
 /* GLOBAL VARIABLES */
-static ds3231_time_t 		g_time;
+static ds3231_time_t 		g_time, e_time;
 static ds3231_alarm_t		g_alarm;
 static timer_t				g_timer = {.paused = true};
 static bool					alarm_on;
@@ -93,11 +100,16 @@ static uint8_t dow_arr[][4] = { DOW_SUN, DOW_MON, DOW_TUE, DOW_WED, DOW_THU, DOW
 static void avr_init(void);
 static bool check_lowbattery(void);
 static void display(dispState_t);
-static void edit_alarm(editAlarmState_t);
+static void edit(editState_t);
 static void buzzer(bool on);
 static uint8_t increment_bcd(uint8_t bcd);
 static uint8_t bcd2bin8(uint8_t bcd);
 static uint8_t bin2bcd8(uint8_t bin);
+static uint8_t increment_minute(uint8_t);
+static uint8_t increment_hour(uint8_t);
+static uint8_t increment_date(uint8_t);
+static uint8_t increment_month(uint8_t);
+static uint8_t increment_year(uint8_t);
 static void increment_timer(timer_t *);
 static uint8_t decrement_timer(timer_t *);
 
@@ -108,7 +120,7 @@ int main(void)
 	uint8_t rtc_status;
 	bool low_bat = false;
 	dispState_t dispState = DISP_HHMM;
-	editAlarmState_t editAlarmState = EDIT_ALARM_INIT;
+	editState_t editState = EDIT_ALARM_INIT;
 
 	avr_init();
 	ds3231_read_alarm2(&g_alarm, &alarm_on);
@@ -127,7 +139,7 @@ int main(void)
 				increment_timer(&g_timer);
 			}
 
-			if(dispState != EDIT_ALARM) {
+			if(dispState != DISP_EDIT) {
 				if(DISP_HHMM == dispState) {
 					if(idle < 10) ++idle;
 				}
@@ -141,10 +153,10 @@ int main(void)
 				display(dispState);
 			}
 			else {
-				edit_alarm(editAlarmState);
+				edit(editState);
 			}
 
-			if(alarm_on && (g_alarm.hour == g_time.hour) && (g_alarm.min == g_time.min)) {  /* Check for Alarm match */
+			if(alarm_on && (g_alarm.hour == g_time.hour) && (g_alarm.min == g_time.min)) {  /* DS3231 Alarm2 A2F flag will not set so, check we for Alarm match here */
 				if(!buzzer_on) {
 					buzzer_on = true;
 					idle = 0;
@@ -182,8 +194,8 @@ int main(void)
 			switch (dispState) {
 			case DISP_HHMM:
 				if(long_press) {
-					dispState = EDIT_ALARM;
-					editAlarmState = EDIT_ALARM_INIT;
+					dispState = DISP_EDIT;
+					editState = EDIT_ALARM_INIT;
 				}
 				else {
 					dispState = DISP_SS;
@@ -208,7 +220,13 @@ int main(void)
 				break;
 
 			case DISP_MONTH:
-				dispState = DISP_HHMM;
+				if(long_press) {
+					dispState = DISP_EDIT;
+					editState = EDIT_TIME_INIT;
+				}
+				else {
+					dispState = DISP_HHMM;
+				}
 				break;
 
 			case DISP_TIMER_INIT:
@@ -241,8 +259,8 @@ int main(void)
 				buzzer(false);
 				break;
 
-			case EDIT_ALARM:
-				switch(editAlarmState) {
+			case DISP_EDIT:
+				switch(editState) {
 				case EDIT_ALARM_INIT:
 					if(long_press) {
 						if(alarm_on) {
@@ -255,26 +273,23 @@ int main(void)
 						}
 					}
 					else {
-						editAlarmState = EDIT_ALARM_MIN;
+						editState = EDIT_ALARM_MIN;
 						alarm_on = false; // Prevent alarm going off during set up
 					}
 					break;
 
 				case EDIT_ALARM_MIN:
 					if(long_press) {
-						editAlarmState = EDIT_ALARM_HOUR;
+						editState = EDIT_ALARM_HOUR;
 					}
 					else {
-						g_alarm.min = increment_bcd(g_alarm.min);
-						if(g_alarm.min >= 0x60) {
-							g_alarm.min = 0;
-						}
+						g_alarm.min = increment_minute(g_alarm.min);
 					}
 					break;
 
 				case EDIT_ALARM_HOUR:
 					if(long_press) {
-						editAlarmState = EDIT_ALARM_SET;
+						editState = EDIT_ALARM_SET;
 						g_alarm.day_date = g_time.date; // Day/Date is irrelevant for DAILY alarm type */
 						ds3231_set_alarm2(&g_alarm, ALARM_DAILY);
 						if(!ds3231_alarm2_onoff(ALARM_ON)) {
@@ -282,25 +297,79 @@ int main(void)
 						}
 					}
 					else {
-						g_alarm.hour = increment_bcd(g_alarm.hour);
-						if(g_alarm.hour >= 0x24) {
-							g_alarm.hour = 0;
-						}
+						g_alarm.hour = increment_hour(g_alarm.hour);
 					}
 					break;
 
 				case EDIT_ALARM_SET:
+				case EDIT_TIME_SET:
 					dispState = DISP_HHMM;
 					break;
+
+				case EDIT_TIME_INIT:
+					if(long_press) {
+						dispState = DISP_HHMM;
+					}
+					else {
+						editState = EDIT_TIME_MIN;
+						e_time = g_time;
+					}
+					break;
+
+				case EDIT_TIME_MIN:
+					if(long_press) {
+						editState = EDIT_TIME_HOUR;
+					}
+					else {
+						e_time.min = increment_minute(e_time.min);
+					}
+					break;
+
+				case EDIT_TIME_HOUR:
+					if(long_press) {
+						editState = EDIT_TIME_DATE;
+					}
+					else {
+						e_time.hour = increment_hour(e_time.hour);
+					}
+					break;
+
+				case EDIT_TIME_DATE:
+					if(long_press) {
+						editState = EDIT_TIME_MONTH;
+					}
+					else {
+						e_time.date = increment_date(e_time.date);
+					}
+					break;
+
+				case EDIT_TIME_MONTH:
+					if(long_press) {
+						editState = EDIT_TIME_YEAR;
+					}
+					else {
+						e_time.month = increment_month(e_time.month);
+					}
+					break;
+
+				case EDIT_TIME_YEAR:
+					if(long_press) {
+						editState = EDIT_TIME_SET;
+					}
+					else {
+						e_time.year = increment_year(e_time.year);
+					}
+					break;
+
 				}
 
 			}
 
-			if(dispState != EDIT_ALARM) {
+			if(dispState != DISP_EDIT) {
 				display(dispState);
 			}
 			else {
-				edit_alarm(editAlarmState);
+				edit(editState);
 			}
 		}
 
@@ -376,6 +445,7 @@ static bool check_lowbattery(void)
 		adc_count = 0;
 	}
 
+#if 0  // LDR not tested yet
 	/* Sample LDR value and adjust LED brightness */
 	adc_select_channel(LDR_ADC_CHANNEL);
 	ADC_LEFT_ADJUST();
@@ -394,6 +464,7 @@ static bool check_lowbattery(void)
 	else if (ldr_val < LDR_VAL4) {
 		tm1637_set_brightness(TM1637_DISPLAY_PW_10_16);
 	}
+#endif
 
 	return low_bat;
 }
@@ -402,7 +473,7 @@ static bool check_lowbattery(void)
 
 void display(dispState_t state)
 {
-	uint8_t digit_buf[4];
+	uint8_t digit_buf[4] = {0};
 	uint8_t dot_pos = 0;
 	uint8_t hour = bcd2bin8(g_time.hour);
 
@@ -429,7 +500,6 @@ void display(dispState_t state)
 		break;
 
 	case DISP_SS:
-		digit_buf[0] = digit_buf[1] = 0;
 		tm1637_bcd_to_2digits(g_time.sec, &digit_buf[2], true);
 		dot_pos = 2;
 		break;
@@ -460,7 +530,7 @@ void display(dispState_t state)
 		break;
 
 	case DISP_DOW:
-	case EDIT_ALARM:
+	case DISP_EDIT:
 		break;
 	}
 
@@ -472,6 +542,92 @@ void display(dispState_t state)
 	}
 }
 
+
+
+static void edit(editState_t state)
+{
+	uint8_t digit_buf[4] = {0};
+	uint8_t dot_pos = 0;
+
+	switch(state) {
+	case EDIT_ALARM_INIT:
+		digit_buf[0] = 0x77; // 'A'
+		digit_buf[1] = 0x38; // 'L'
+		digit_buf[2] = 0x5C; // 'o'
+		digit_buf[3] = (alarm_on) ? 0x54 : 0x71; // 'n'/'f'
+		dot_pos = 2;
+		break;
+
+	case EDIT_ALARM_MIN:
+		tm1637_bcd_to_2digits(g_alarm.hour, &digit_buf[0], true);
+		if(g_time.sec & 0x1) {
+			tm1637_bcd_to_2digits(g_alarm.min, &digit_buf[2], true);
+		}
+		dot_pos = 2;
+		break;
+
+	case EDIT_ALARM_HOUR:
+		if(g_time.sec & 0x1) {
+			tm1637_bcd_to_2digits(g_alarm.hour, &digit_buf[0], true);
+		}
+		tm1637_bcd_to_2digits(g_alarm.min, &digit_buf[2], true);
+		dot_pos = 2;
+		break;
+
+	case EDIT_ALARM_SET:
+	case EDIT_TIME_SET:
+		digit_buf[0] = 0x6D; // 'S'
+		digit_buf[1] = 0x79; // 'E'
+		digit_buf[2] = 0x78; // 't'
+		break;
+
+	case EDIT_TIME_INIT:
+		digit_buf[0] = 0x79; // 'E'
+		digit_buf[1] = 0x5E; // 'd'
+		digit_buf[2] = 0x10; // 'i'
+		digit_buf[3] = 0x78; // 't'
+		break;
+
+	case EDIT_TIME_MIN:
+		tm1637_bcd_to_2digits(e_time.hour, &digit_buf[0], true);
+		if(g_time.sec & 0x1) {
+			tm1637_bcd_to_2digits(e_time.min, &digit_buf[2], true);
+		}
+		dot_pos = 2;
+		break;
+
+	case EDIT_TIME_HOUR:
+		if(g_time.sec & 0x1) {
+			tm1637_bcd_to_2digits(e_time.hour, &digit_buf[0], true);
+		}
+		tm1637_bcd_to_2digits(e_time.min, &digit_buf[2], true);
+		dot_pos = 2;
+		break;
+
+	case EDIT_TIME_DATE:
+		tm1637_bcd_to_2digits(e_time.month, &digit_buf[0], false);
+		if(g_time.sec & 0x1) {
+			tm1637_bcd_to_2digits(e_time.date, &digit_buf[2], false);
+		}
+		break;
+
+	case EDIT_TIME_MONTH:
+		if(g_time.sec & 0x1) {
+			tm1637_bcd_to_2digits(e_time.month, &digit_buf[0], false);
+		}
+		tm1637_bcd_to_2digits(e_time.date, &digit_buf[2], false);
+		break;
+
+	case EDIT_TIME_YEAR:
+		if(g_time.sec & 0x1) {
+			tm1637_bcd_to_2digits(20, &digit_buf[0], true);
+			tm1637_bcd_to_2digits(e_time.year, &digit_buf[2], true);
+		}
+		break;
+	}
+	tm1637_send_digits(digit_buf, sizeof(digit_buf), dot_pos);
+
+}
 
 
 
@@ -505,62 +661,6 @@ static uint8_t decrement_timer(timer_t *tim)
 }
 
 
-static void edit_alarm(editAlarmState_t state)
-{
-	uint8_t digit_buf[4];
-	uint8_t dot_pos = 2;
-
-	switch(state) {
-	case EDIT_ALARM_INIT:
-		digit_buf[0] = 0x77; // 'A'
-		digit_buf[1] = 0x38; // 'L'
-		digit_buf[2] = 0x5C; // 'o'
-		digit_buf[3] = (alarm_on) ? 0x54 : 0x71; // 'n'/'f'
-		break;
-
-	case EDIT_ALARM_MIN:
-		tm1637_bcd_to_2digits(g_alarm.hour, &digit_buf[0], true);
-		if(g_time.sec & 0x1) {
-			tm1637_bcd_to_2digits(g_alarm.min, &digit_buf[2], true);
-		}
-		else {
-			digit_buf[2] = digit_buf[3] = 0;
-		}
-		break;
-
-	case EDIT_ALARM_HOUR:
-		if(g_time.sec & 0x1) {
-			tm1637_bcd_to_2digits(g_alarm.hour, &digit_buf[0], true);
-		}
-		else {
-			digit_buf[0] = digit_buf[1] = 0;
-		}
-		tm1637_bcd_to_2digits(g_alarm.min, &digit_buf[2], true);
-		break;
-
-	case EDIT_ALARM_SET:
-		digit_buf[0] = 0x6D; // 'S'
-		digit_buf[1] = 0x79; // 'E'
-		digit_buf[2] = 0x78; // 't'
-		digit_buf[3] = 0;
-		dot_pos = 0;
-	}
-	tm1637_send_digits(digit_buf, sizeof(digit_buf), dot_pos);
-
-}
-
-
-/* Start/Stop buzzer tone */
-static __inline__ void buzzer(bool on)
-{
-	if(on) {
-		TCCR1B = (1 << WGM12)|0x2;
-	}
-	else {
-		TCCR1B = 0;
-	}
-}
-
 static __inline__ uint8_t increment_bcd(uint8_t bcd)
 {
 	return (9 == (bcd & 0xF)) ? (bcd+7) : (bcd+1);
@@ -579,6 +679,70 @@ static __inline__ uint8_t bin2bcd8(uint8_t bin)
 {
 	return ((bin/10)<<4 | (bin%10));
 }
+
+
+
+static __inline__ uint8_t increment_minute(uint8_t minute)
+{
+	uint8_t ret = increment_bcd(minute);
+	if(ret > 0x59) {
+		ret = 0;
+	}
+	return ret;
+}
+
+
+static __inline__ uint8_t increment_hour(uint8_t hour)
+{
+	uint8_t ret = increment_bcd(hour);
+	if(ret > 0x23) {
+		ret = 0;
+	}
+	return ret;
+}
+
+
+static __inline__ uint8_t increment_date(uint8_t date)
+{
+	uint8_t ret = increment_bcd(date);
+	if(ret > 0x31) {
+		ret = 1;
+	}
+	return ret;
+}
+
+
+static __inline__ uint8_t increment_month(uint8_t month)
+{
+	uint8_t ret = increment_bcd(month);
+	if(ret > 0x12) {
+		ret = 1;
+	}
+	return ret;
+}
+
+
+static __inline__ uint8_t increment_year(uint8_t year)
+{
+	uint8_t ret = increment_bcd(year);
+	if(ret > 0x99) {
+		ret = 0x25;
+	}
+	return ret;
+}
+
+
+/* Start/Stop buzzer tone */
+static void buzzer(bool on)
+{
+	if(on) {
+		TCCR1B = (1 << WGM12)|0x2;
+	}
+	else {
+		TCCR1B = 0;
+	}
+}
+
 
 
 /* External Interrupt from DS3231 RTC */
