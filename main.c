@@ -29,6 +29,11 @@
 #include "adc.h"
 
 
+/***** CONFIGURATIONS ******/
+
+#define CONFIG_24HR_FORMAT	0		// Define to 1 for 00-23 hour display */
+
+
 #define LDR_VAL1		50
 #define LDR_VAL2		90
 #define LDR_VAL3		140
@@ -52,9 +57,10 @@ typedef enum _dispStates {
 	DISP_ALARM,
 	DISP_EDIT,
 	DISP_TIMER_INIT,
-//	DISP_TIMER_PAUSE,
 	DISP_TIMER_MMSS,
-//	DISP_TIMER_HHMM
+//	DISP_TIMER_HHMM,
+	DISP_CDT_INIT,
+	DISP_CDT_MMSS,
 } dispState_t;
 
 
@@ -69,7 +75,10 @@ typedef enum _editStates {
 	EDIT_TIME_DATE,
 	EDIT_TIME_MONTH,
 	EDIT_TIME_YEAR,
-	EDIT_TIME_SET
+	EDIT_TIME_SET,
+	EDIT_CDT_SEC,
+	EDIT_CDT_MIN,
+	EDIT_CDT_HOUR
 } editState_t;
 
 
@@ -77,14 +86,18 @@ typedef struct _timer_t {
 	uint8_t sec;
 	uint8_t min;
 	uint8_t hour;
-	bool	paused;
+	bool paused;
+	bool set;
+	bool expired;
 } timer_t;
 
 
 /* GLOBAL VARIABLES */
 static ds3231_time_t 		g_time, e_time;
 static ds3231_alarm_t		g_alarm;
-static timer_t				g_timer = {.paused = true};
+static timer_t				inc_timer = {.paused = true};
+static timer_t				cd_timer = {.paused = true};
+static timer_t 				bkp_timer = {.paused = true};
 static bool					alarm_on;
 static bool					buzzer_on;
 static uint8_t 				idle;
@@ -94,30 +107,31 @@ static volatile bool		button_flag;
 static volatile bool 		no_sleep;
 static volatile uint16_t 	button_samp;
 static uint8_t dow_arr[][4] = { DOW_SUN, DOW_MON, DOW_TUE, DOW_WED, DOW_THU, DOW_FRI, DOW_SAT};
-
+static uint8_t tm[] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};  /* Table for day of week calculation */
 
 /* PRIVATE FUNCTIONS */
 static void avr_init(void);
 static bool check_lowbattery(void);
-static void display(dispState_t);
-static void edit(editState_t);
+static void display(dispState_t state);
+static void edit(editState_t state);
 static void buzzer(bool on);
 static uint8_t increment_bcd(uint8_t bcd);
 static uint8_t bcd2bin8(uint8_t bcd);
 static uint8_t bin2bcd8(uint8_t bin);
-static uint8_t increment_minute(uint8_t);
-static uint8_t increment_hour(uint8_t);
-static uint8_t increment_date(uint8_t);
-static uint8_t increment_month(uint8_t);
-static uint8_t increment_year(uint8_t);
-static void increment_timer(timer_t *);
-static uint8_t decrement_timer(timer_t *);
-
+static uint8_t increment_minute(uint8_t minute);
+static uint8_t increment_hour(uint8_t hour);
+static uint8_t increment_date(uint8_t date);
+static uint8_t increment_month(uint8_t month);
+static uint8_t increment_year(uint8_t year);
+static void increment_timer(timer_t *tim);
+static bool decrement_timer(timer_t *tim);
+static uint8_t dayofweek(uint8_t date, uint8_t month, uint16_t year);
 
 /*  MAIN  */
 int main(void)
 {
 	uint8_t rtc_status;
+	uint8_t elapsed = 0;
 	bool low_bat = false;
 	dispState_t dispState = DISP_HHMM;
 	editState_t editState = EDIT_ALARM_INIT;
@@ -135,8 +149,27 @@ int main(void)
 			ds3231_read_status(&rtc_status);
 
 			ds3231_read_time(&g_time);   /* Read time from RTC */
-			if(!g_timer.paused) {  /* Increment Timer */
-				increment_timer(&g_timer);
+			if(!inc_timer.paused) {  /* Increment Timer */
+				increment_timer(&inc_timer);
+			}
+			if((!cd_timer.paused) && cd_timer.set) {
+				cd_timer.expired = decrement_timer(&cd_timer);
+				if(cd_timer.expired) {
+					idle = 0;
+					elapsed = 0;
+					cd_timer.set = false;
+					dispState = DISP_CDT_MMSS;
+					buzzer_on = true;  // prevent sleep
+					buzzer(true);
+				}
+			}
+			if(cd_timer.expired) {
+				if(++elapsed > 2) {
+					cd_timer.expired = false;
+					dispState = DISP_HHMM;
+					buzzer_on = false;  // can sleep now
+					buzzer(false);
+				}
 			}
 
 			if(dispState != DISP_EDIT) {
@@ -156,19 +189,22 @@ int main(void)
 				edit(editState);
 			}
 
-			if(alarm_on && (g_alarm.hour == g_time.hour) && (g_alarm.min == g_time.min)) {  /* DS3231 Alarm2 A2F flag will not set so, check we for Alarm match here */
+			if(alarm_on && (g_alarm.hour == g_time.hour) && (g_alarm.min == g_time.min) && ((g_alarm.sec == g_time.sec))) {  /* DS3231 Alarm2 A2F flag will not set so, check we for Alarm match here */
 				if(!buzzer_on) {
-					buzzer_on = true;
+					buzzer_on = true;  // prevent sleep
 					idle = 0;
+					elapsed = 0;
 					dispState = DISP_ALARM;
 					buzzer(true); /* Start buzzer tone */
 				}
 			}
 			else {
-				if(buzzer_on) { /* At the end of Alarm matched minute, turn off Alarm buzzer */
-					dispState = DISP_HHMM;
-					buzzer_on = false;
-					buzzer(false);  /* Stop buzzer tone */
+				if(buzzer_on) {
+					if(++elapsed > 30) {
+						buzzer_on = false;   // can sleep now
+						buzzer(false);
+						dispState = DISP_HHMM;
+					}
 				}
 			}
 
@@ -203,12 +239,7 @@ int main(void)
 				break;
 
 			case DISP_SS:
-				if(long_press) {
-					dispState = DISP_TIMER_INIT;
-				}
-				else {
-					dispState = DISP_DOW;
-				}
+				dispState = (long_press) ? DISP_TIMER_INIT : DISP_DOW;
 				break;
 
 			case DISP_DOW:
@@ -231,31 +262,67 @@ int main(void)
 
 			case DISP_TIMER_INIT:
 				if(long_press) {
-					dispState = DISP_HHMM;
+					dispState = DISP_CDT_INIT;
 				}
 				else {
-					g_timer.paused = false;
+					inc_timer.paused = false;
 					dispState = DISP_TIMER_MMSS;
 				}
 				break;
 
 			case DISP_TIMER_MMSS:
 				if(long_press) {
-					if(g_timer.paused) {
-						g_timer.hour = 0;
-						g_timer.min = 0;
-						g_timer.sec = 0;
+					if(inc_timer.paused) {
+						bkp_timer = inc_timer;  // Save current timer value for CDT
+						inc_timer.hour = 0;
+						inc_timer.min = 0;
+						inc_timer.sec = 0;
+						dispState = DISP_TIMER_INIT;
 					}
-					dispState = DISP_TIMER_INIT;
+					else {
+						dispState = DISP_HHMM;
+					}
 				}
 				else {
-					g_timer.paused = !g_timer.paused;
+					inc_timer.paused = !inc_timer.paused;
+				}
+				break;
+
+			case DISP_CDT_INIT:
+				if(long_press) {
+					dispState = DISP_HHMM;
+				}
+				else {
+					if(!cd_timer.set) {
+						cd_timer = bkp_timer;
+						dispState = DISP_EDIT;
+						editState = EDIT_CDT_SEC;
+					}
+					else {
+						dispState = DISP_CDT_MMSS;
+					}
+				}
+				break;
+
+			case DISP_CDT_MMSS:
+				if(long_press) {
+					if(cd_timer.paused) {  /* Reset CDT */
+						cd_timer = bkp_timer;
+						dispState = DISP_EDIT;
+						editState = EDIT_CDT_SEC;
+					}
+					else {
+						dispState = DISP_HHMM;
+					}
+				}
+				else {
+					cd_timer.paused = !cd_timer.paused;
 				}
 				break;
 
 			case DISP_ALARM:
 				dispState = DISP_HHMM;
-				// buzzer_on = false;  // buzzer_on would be checked and set again at the alarm match check and buzzer would still sound through the whole minute, so comment this out
+				buzzer_on = false;  // if false, would be set true again at the alarm match check
 				buzzer(false);
 				break;
 
@@ -355,12 +422,49 @@ int main(void)
 				case EDIT_TIME_YEAR:
 					if(long_press) {
 						editState = EDIT_TIME_SET;
+						e_time.sec = 0;
+						e_time.day = dayofweek(bcd2bin8(e_time.date), bcd2bin8(e_time.month), 2000+bcd2bin8(e_time.year)) + 1;  // Day of week is in the range 1-7
+						ds3231_set_time(&e_time);
 					}
 					else {
 						e_time.year = increment_year(e_time.year);
 					}
 					break;
 
+				case EDIT_CDT_SEC:
+					if(long_press) {
+						editState = EDIT_CDT_MIN;
+					}
+					else {
+						if(++cd_timer.sec > 59) {
+							cd_timer.sec = 0;
+						}
+					}
+					break;
+
+				case EDIT_CDT_MIN:
+					if(long_press) {
+						editState = EDIT_CDT_HOUR;
+					}
+					else {
+						if(++cd_timer.min > 59) {
+							cd_timer.min = 0;
+						}
+					}
+					break;
+
+				case EDIT_CDT_HOUR:
+					if(long_press) { // Start counting down
+						cd_timer.set = true;
+						cd_timer.paused = false;
+						dispState = DISP_CDT_MMSS;
+					}
+					else {
+						if(++cd_timer.hour > 99) {
+							cd_timer.hour = 0;
+						}
+					}
+					break;
 				}
 
 			}
@@ -475,15 +579,18 @@ void display(dispState_t state)
 {
 	uint8_t digit_buf[4] = {0};
 	uint8_t dot_pos = 0;
-	uint8_t hour = bcd2bin8(g_time.hour);
+	uint8_t hour = g_time.hour;
 
-	if(hour > 12) {  /* RTC stores time in 00-24hr format */
+#if !CONFIG_24HR_FORMAT
+	hour = bcd2bin8(hour);  // Time read from RTC is 24hr format, so convert to 12hr format
+	if(hour > 12) {
 		hour -= 12;
 	}
 	else if(!hour) {
 		hour = 12;
 	}
 	hour = bin2bcd8(hour);
+#endif
 
 	switch(state) {
 	case DISP_HHMM:
@@ -506,7 +613,7 @@ void display(dispState_t state)
 
 	case DISP_DATE:
 		digit_buf[0] = 0x5E; // 'd'
-		digit_buf[1] = 0x78; // 't'
+		//digit_buf[1] = 0x78; // 't'
 		tm1637_bcd_to_2digits(g_time.date, &digit_buf[2], false);
 		break;
 
@@ -519,13 +626,26 @@ void display(dispState_t state)
 	case DISP_TIMER_INIT:
 		digit_buf[0] = 0x78; //'t'
 		digit_buf[1] = 0x10; //'i'
-		tm1637_bcd_to_2digits(bin2bcd8(g_timer.sec), &digit_buf[2], true);
+		tm1637_bcd_to_2digits(bin2bcd8(inc_timer.sec), &digit_buf[2], true);
 		dot_pos = 2;
 		break;
 
 	case DISP_TIMER_MMSS:
-		tm1637_bcd_to_2digits(bin2bcd8(g_timer.min), &digit_buf[0], true);
-		tm1637_bcd_to_2digits(bin2bcd8(g_timer.sec), &digit_buf[2], true);
+		tm1637_bcd_to_2digits(bin2bcd8(inc_timer.min), &digit_buf[0], true);
+		tm1637_bcd_to_2digits(bin2bcd8(inc_timer.sec), &digit_buf[2], true);
+		dot_pos = 2;
+		break;
+
+	case DISP_CDT_INIT:
+		digit_buf[0] = 0x39; // 'C'
+		digit_buf[1] = 0x5E; // 'd'
+		tm1637_bcd_to_2digits(bin2bcd8(cd_timer.sec), &digit_buf[2], true);
+		dot_pos = 2;
+		break;
+
+	case DISP_CDT_MMSS:
+		tm1637_bcd_to_2digits(bin2bcd8(cd_timer.min), &digit_buf[0], true);
+		tm1637_bcd_to_2digits(bin2bcd8(cd_timer.sec), &digit_buf[2], true);
 		dot_pos = 2;
 		break;
 
@@ -620,9 +740,30 @@ static void edit(editState_t state)
 
 	case EDIT_TIME_YEAR:
 		if(g_time.sec & 0x1) {
-			tm1637_bcd_to_2digits(20, &digit_buf[0], true);
+			tm1637_bcd_to_2digits(0x20, &digit_buf[0], true);
 			tm1637_bcd_to_2digits(e_time.year, &digit_buf[2], true);
 		}
+		break;
+
+	case EDIT_CDT_SEC:
+		tm1637_bcd_to_2digits(bin2bcd8(cd_timer.min), &digit_buf[0], true);
+		if(g_time.sec & 0x1) {
+			tm1637_bcd_to_2digits(bin2bcd8(cd_timer.sec), &digit_buf[2], true);
+		}
+		break;
+
+	case EDIT_CDT_MIN:
+		if(g_time.sec & 0x1) {
+			tm1637_bcd_to_2digits(bin2bcd8(cd_timer.min), &digit_buf[0], true);
+		}
+		tm1637_bcd_to_2digits(bin2bcd8(cd_timer.sec), &digit_buf[2], true);
+		break;
+
+	case EDIT_CDT_HOUR:
+		if(g_time.sec & 0x1) {
+			tm1637_bcd_to_2digits(bin2bcd8(cd_timer.hour), &digit_buf[0], true);
+		}
+		tm1637_bcd_to_2digits(bin2bcd8(cd_timer.min), &digit_buf[2], true);
 		break;
 	}
 	tm1637_send_digits(digit_buf, sizeof(digit_buf), dot_pos);
@@ -645,10 +786,10 @@ static void increment_timer(timer_t *tim)
 }
 
 
-static uint8_t decrement_timer(timer_t *tim)
+static bool decrement_timer(timer_t *tim)
 {
 	if((0 == tim->hour) && (0 == tim->min) && (0 == tim->sec)) {  /* Timer expired */
-		return 1;
+		return true;
 	}
 	if((0 == tim->sec--) && (tim->min)) {
 		tim->sec = 59;
@@ -657,8 +798,23 @@ static uint8_t decrement_timer(timer_t *tim)
 			tim->hour--;
 		}
 	}
-	return 0;
+	return false;
 }
+
+
+static uint8_t dayofweek(uint8_t date, uint8_t month, uint16_t year)
+{
+	uint16_t temp;
+
+	if (month < 3) {
+		year--;
+	}
+
+	temp = year + year/4 - year/100 + year/400 + tm[month - 1] + date;
+	return (uint8_t)(temp % 7);
+
+}
+
 
 
 static __inline__ uint8_t increment_bcd(uint8_t bcd)
